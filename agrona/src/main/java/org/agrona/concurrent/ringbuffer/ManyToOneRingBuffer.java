@@ -338,15 +338,30 @@ public class ManyToOneRingBuffer implements RingBuffer
 
     private long getAndAddLongWithBuffer(final AtomicBuffer buffer, final int position, final long increment)
     {
-        long value = buffer.getLongVolatile(position);
-        while (!buffer.compareAndSetLong(position, value, value + increment))
+        if (1 + 1 > 1)
         {
-            System.out.println(String.format("Attempting CAS Addition: %d + %d", value, increment));
-            //LockSupport.parkNanos(1000000000);
-            value = buffer.getLongVolatile(position);
+            final long before = buffer.getAndAddLong(position, increment);
+            UnsafeAccess.UNSAFE.fullFence();
+            final long after = buffer.getAndAddLong(position, 0);
+            if (before == after && increment != 0)
+            {
+                System.out.println(String.format(
+                    " ---------- CAS Addition Failed: %d + %d = %d", before, increment, after));
+            }
+            return before;
         }
-        System.out.println(String.format("CAS Addition Success: %d + %d", value, increment));
-        return value;
+        else
+        {
+            long value = buffer.getLongVolatile(position);
+            while (!buffer.compareAndSetLong(position, value, value + increment))
+            {
+                System.out.println(String.format("Attempting CAS Addition: %d + %d", value, increment));
+                //LockSupport.parkNanos(1000000000);
+                value = buffer.getLongVolatile(position);
+            }
+            System.out.println(String.format("CAS Addition Success: %d + %d", value, increment));
+            return value;
+        }
     }
 
     private int claimLinearCapacity(final AtomicBuffer buffer, final int requiredCapacity)
@@ -356,7 +371,6 @@ public class ManyToOneRingBuffer implements RingBuffer
         final int headCachePositionIndex = this.headCachePositionIndex;
         final int mask = capacity - 1;
 
-        //final long tail = buffer.getAndAddLong(tailPositionIndex, requiredCapacity);
         final long tail = getAndAddLongWithBuffer(buffer, tailPositionIndex, requiredCapacity);
         final int tailIndex = (int)tail & mask;
         final int toBufferEndLength = capacity - tailIndex;
