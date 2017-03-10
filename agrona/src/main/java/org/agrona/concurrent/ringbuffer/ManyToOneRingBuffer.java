@@ -39,6 +39,11 @@ public class ManyToOneRingBuffer implements RingBuffer
      */
     private static final int INSUFFICIENT_CAPACITY = -2;
 
+    /**
+     * Buffer has insufficient contiguous capacity to record a message.
+     */
+    private static final int DISCONTIGUOUS_CAPACITY = -4;
+
     private final int capacity;
     private final int maxMsgLength;
     private final int tailPositionIndex;
@@ -94,9 +99,16 @@ public class ManyToOneRingBuffer implements RingBuffer
         final AtomicBuffer buffer = this.buffer;
         final int recordLength = length + HEADER_LENGTH;
         final int requiredCapacity = align(recordLength, ALIGNMENT);
-        final int recordIndex = claimCapacity(buffer, requiredCapacity);
+        int recordIndex = claimLinearCapacity(buffer, requiredCapacity);
 
-        if (INSUFFICIENT_CAPACITY != recordIndex)
+        if (INSUFFICIENT_CAPACITY == recordIndex || DISCONTIGUOUS_CAPACITY == recordIndex)
+        {
+            // TODO: implement less naive retries
+            // (such as reserving double space to prevent more than 2 consecutive discontinuity errors)
+            recordIndex = claimLinearCapacity(buffer, requiredCapacity);
+        }
+
+        if (INSUFFICIENT_CAPACITY != recordIndex && DISCONTIGUOUS_CAPACITY != recordIndex)
         {
             buffer.putLongOrdered(recordIndex, makeHeader(-recordLength, msgTypeId));
             UnsafeAccess.UNSAFE.storeFence();
@@ -321,6 +333,57 @@ public class ManyToOneRingBuffer implements RingBuffer
         {
             throw new IllegalArgumentException(String.format(
                 "encoded message exceeds maxMsgLength of %d, length=%d", maxMsgLength, length));
+        }
+    }
+
+    private long getAndAddLongWithBuffer(final AtomicBuffer buffer, final int position, final long increment)
+    {
+        long value = buffer.getLongVolatile(position);
+        while (!buffer.compareAndSetLong(position, value, value + increment))
+        {
+            System.out.println(String.format("Attempting CAS Addition: %d + %d", value, increment));
+            //LockSupport.parkNanos(1000000000);
+            value = buffer.getLongVolatile(position);
+        }
+        System.out.println(String.format("CAS Addition Success: %d + %d", value, increment));
+        return value;
+    }
+
+    private int claimLinearCapacity(final AtomicBuffer buffer, final int requiredCapacity)
+    {
+        final int capacity = this.capacity;
+        final int tailPositionIndex = this.tailPositionIndex;
+        final int headCachePositionIndex = this.headCachePositionIndex;
+        final int mask = capacity - 1;
+
+        //final long tail = buffer.getAndAddLong(tailPositionIndex, requiredCapacity);
+        final long tail = getAndAddLongWithBuffer(buffer, tailPositionIndex, requiredCapacity);
+        final int tailIndex = (int)tail & mask;
+        final int toBufferEndLength = capacity - tailIndex;
+
+        final long head = buffer.getLongVolatile(headCachePositionIndex);
+        final int availableCapacity = capacity - (int)(tail - head);
+
+        if (requiredCapacity > availableCapacity)
+        {
+            if (0 >= availableCapacity)
+            {
+                final long current = buffer.getLongVolatile(headPositionIndex);
+                buffer.putLongOrdered(tailPositionIndex, current + 3 * capacity);
+                buffer.putLongOrdered(headCachePositionIndex, current);
+                buffer.putLongOrdered(tailPositionIndex, tail);
+            }
+            return INSUFFICIENT_CAPACITY;
+        }
+        else if (requiredCapacity > toBufferEndLength)
+        {
+            buffer.putLongOrdered(0, makeHeader(requiredCapacity - toBufferEndLength, PADDING_MSG_TYPE_ID));
+            buffer.putLongOrdered(tailIndex, makeHeader(toBufferEndLength, PADDING_MSG_TYPE_ID));
+            return DISCONTIGUOUS_CAPACITY;
+        }
+        else
+        {
+            return tailIndex;
         }
     }
 
