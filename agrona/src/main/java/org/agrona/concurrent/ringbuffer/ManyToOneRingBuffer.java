@@ -44,6 +44,7 @@ public class ManyToOneRingBuffer implements RingBuffer
      */
     private static final int DISCONTIGUOUS_CAPACITY = -4;
 
+    private final int capShift;
     private final int capacity;
     private final int maxMsgLength;
     private final int tailPositionIndex;
@@ -67,6 +68,7 @@ public class ManyToOneRingBuffer implements RingBuffer
         this.buffer = buffer;
         checkCapacity(buffer.capacity());
         capacity = buffer.capacity() - TRAILER_LENGTH;
+        capShift = 32 - Integer.numberOfLeadingZeros(capacity - 1);
 
         buffer.verifyAlignment();
 
@@ -99,13 +101,22 @@ public class ManyToOneRingBuffer implements RingBuffer
         final AtomicBuffer buffer = this.buffer;
         final int recordLength = length + HEADER_LENGTH;
         final int requiredCapacity = align(recordLength, ALIGNMENT);
-        int recordIndex = claimLinearCapacity(buffer, requiredCapacity);
+        int recordIndex = claimCapacity(buffer, requiredCapacity);
 
-        if (INSUFFICIENT_CAPACITY == recordIndex || DISCONTIGUOUS_CAPACITY == recordIndex)
+        if (DISCONTIGUOUS_CAPACITY == recordIndex)
         {
-            // TODO: implement less naive retries
-            // (such as reserving double space to prevent more than 2 consecutive discontinuity errors)
-            recordIndex = claimLinearCapacity(buffer, requiredCapacity);
+            recordIndex = claimCapacity(buffer, requiredCapacity);
+            if (DISCONTIGUOUS_CAPACITY == recordIndex)
+            {
+                // TODO: implement less naive retries
+                // (such as reserving double space to prevent more than 2 consecutive discontinuity errors)
+                recordIndex = recordIndex;
+            }
+        }
+
+        if (INSUFFICIENT_CAPACITY == recordIndex)
+        {
+            recordIndex = claimCapacity(buffer, requiredCapacity);
         }
 
         if (INSUFFICIENT_CAPACITY != recordIndex && DISCONTIGUOUS_CAPACITY != recordIndex)
@@ -227,7 +238,7 @@ public class ManyToOneRingBuffer implements RingBuffer
      */
     public long producerPosition()
     {
-        return buffer.getLongVolatile(tailPositionIndex);
+        return size() + buffer.getLongVolatile(headCachePositionIndex);
     }
 
     /**
@@ -243,19 +254,16 @@ public class ManyToOneRingBuffer implements RingBuffer
      */
     public int size()
     {
-        long headBefore;
-        long tail;
-        long headAfter = buffer.getLongVolatile(headPositionIndex);
+        final int capShift = this.capShift;
+        final int capacity = this.capacity;
+        final int mask = capacity - 1;
 
-        do
-        {
-            headBefore = headAfter;
-            tail = buffer.getLongVolatile(tailPositionIndex);
-            headAfter = buffer.getLongVolatile(headPositionIndex);
-        }
-        while (headAfter != headBefore);
+        final long bits = buffer.getLongVolatile(tailPositionIndex);
+        final long tail = bits >> capShift;
+        final long head = mask & (int)bits;
+        final int diff = (int)(tail - head);
 
-        return (int)(tail - headAfter);
+        return diff < capacity ? diff : capacity;
     }
 
     /**
@@ -266,7 +274,7 @@ public class ManyToOneRingBuffer implements RingBuffer
         final AtomicBuffer buffer = this.buffer;
         final int mask = capacity - 1;
         final int consumerIndex = (int)(buffer.getLongVolatile(headPositionIndex) & mask);
-        final int producerIndex = (int)(buffer.getLongVolatile(tailPositionIndex) & mask);
+        final int producerIndex = (int)((buffer.getLongVolatile(tailPositionIndex) >> capShift) & mask);
 
         if (producerIndex == consumerIndex)
         {
@@ -336,62 +344,37 @@ public class ManyToOneRingBuffer implements RingBuffer
         }
     }
 
-    private long getAndAddLongWithBuffer(final AtomicBuffer buffer, final int position, final long increment)
+    private int claimCapacity(final AtomicBuffer buffer, final int requiredCapacity)
     {
-        if (1 + 1 > 1)
-        {
-            final long before = buffer.getAndAddLong(position, increment);
-            UnsafeAccess.UNSAFE.fullFence();
-            final long after = buffer.getAndAddLong(position, 0);
-            if (before == after && increment != 0)
-            {
-                System.out.println(String.format(
-                    " ---------- CAS Addition Failed: %d + %d = %d", before, increment, after));
-            }
-            return before;
-        }
-        else
-        {
-            long value = buffer.getLongVolatile(position);
-            while (!buffer.compareAndSetLong(position, value, value + increment))
-            {
-                System.out.println(String.format("Attempting CAS Addition: %d + %d", value, increment));
-                //LockSupport.parkNanos(1000000000);
-                value = buffer.getLongVolatile(position);
-            }
-            System.out.println(String.format("CAS Addition Success: %d + %d", value, increment));
-            return value;
-        }
-    }
-
-    private int claimLinearCapacity(final AtomicBuffer buffer, final int requiredCapacity)
-    {
+        final int capShift = this.capShift;
         final int capacity = this.capacity;
         final int tailPositionIndex = this.tailPositionIndex;
-        final int headCachePositionIndex = this.headCachePositionIndex;
         final int mask = capacity - 1;
 
-        final long tail = getAndAddLongWithBuffer(buffer, tailPositionIndex, requiredCapacity);
+        final long bits = buffer.getAndAddLong(tailPositionIndex, ((long)requiredCapacity) << capShift);
+        final long tail = bits >> capShift;
+        final long head = bits & mask;
+
+        final int availableCapacity = capacity - HEADER_LENGTH - (int)(tail - head); // forbid head-terminating writes
         final int tailIndex = (int)tail & mask;
         final int toBufferEndLength = capacity - tailIndex;
 
-        final long head = buffer.getLongVolatile(headCachePositionIndex);
-        final int availableCapacity = capacity - (int)(tail - head);
-
         if (requiredCapacity > availableCapacity)
         {
-            if (0 >= availableCapacity)
+            if (0 <= availableCapacity)
             {
                 final long current = buffer.getLongVolatile(headPositionIndex);
-                buffer.putLongOrdered(tailPositionIndex, current + 3 * capacity);
-                buffer.putLongOrdered(headCachePositionIndex, current);
-                buffer.putLongOrdered(tailPositionIndex, tail);
+                final int update = mask & (int)current;
+                final long relative = update > tailIndex ? capacity + (long)tailIndex : tailIndex;
+                buffer.putLongVolatile(headCachePositionIndex, current);
+                buffer.putLongVolatile(tailPositionIndex, update + (relative << capShift));
             }
             return INSUFFICIENT_CAPACITY;
         }
         else if (requiredCapacity > toBufferEndLength)
         {
-            buffer.putLongOrdered(0, makeHeader(requiredCapacity - toBufferEndLength, PADDING_MSG_TYPE_ID));
+            buffer.putLongOrdered(
+                0, makeHeader(requiredCapacity - toBufferEndLength - HEADER_LENGTH, PADDING_MSG_TYPE_ID));
             buffer.putLongOrdered(tailIndex, makeHeader(toBufferEndLength, PADDING_MSG_TYPE_ID));
             return DISCONTIGUOUS_CAPACITY;
         }
@@ -399,68 +382,5 @@ public class ManyToOneRingBuffer implements RingBuffer
         {
             return tailIndex;
         }
-    }
-
-    private int claimCapacity(final AtomicBuffer buffer, final int requiredCapacity)
-    {
-        final int capacity = this.capacity;
-        final int tailPositionIndex = this.tailPositionIndex;
-        final int headCachePositionIndex = this.headCachePositionIndex;
-        final int mask = capacity - 1;
-
-        long head = buffer.getLongVolatile(headCachePositionIndex);
-
-        long tail;
-        int tailIndex;
-        int padding;
-        do
-        {
-            tail = buffer.getLongVolatile(tailPositionIndex);
-            final int availableCapacity = capacity - (int)(tail - head);
-
-            if (requiredCapacity > availableCapacity)
-            {
-                head = buffer.getLongVolatile(headPositionIndex);
-
-                if (requiredCapacity > (capacity - (int)(tail - head)))
-                {
-                    return INSUFFICIENT_CAPACITY;
-                }
-
-                buffer.putLongOrdered(headCachePositionIndex, head);
-            }
-
-            padding = 0;
-            tailIndex = (int)tail & mask;
-            final int toBufferEndLength = capacity - tailIndex;
-
-            if (requiredCapacity > toBufferEndLength)
-            {
-                int headIndex = (int)head & mask;
-
-                if (requiredCapacity > headIndex)
-                {
-                    head = buffer.getLongVolatile(headPositionIndex);
-                    headIndex = (int)head & mask;
-                    if (requiredCapacity > headIndex)
-                    {
-                        return INSUFFICIENT_CAPACITY;
-                    }
-
-                    buffer.putLongOrdered(headCachePositionIndex, head);
-                }
-
-                padding = toBufferEndLength;
-            }
-        }
-        while (!buffer.compareAndSetLong(tailPositionIndex, tail, tail + requiredCapacity + padding));
-
-        if (0 != padding)
-        {
-            buffer.putLongOrdered(tailIndex, makeHeader(padding, PADDING_MSG_TYPE_ID));
-            tailIndex = 0;
-        }
-
-        return tailIndex;
     }
 }

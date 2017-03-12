@@ -77,12 +77,15 @@ public class ManyToOneRingBufferTest
     @Test
     public void shouldRejectWriteWhenInsufficientSpace()
     {
+        final int capShift = 32 - Integer.numberOfLeadingZeros(CAPACITY - 1);
         final int length = 200;
         final long head = 0L;
         final long tail = head + (CAPACITY - align(length - ALIGNMENT, ALIGNMENT));
 
         when(buffer.getLongVolatile(HEAD_COUNTER_INDEX)).thenReturn(head);
         when(buffer.getLongVolatile(TAIL_COUNTER_INDEX)).thenReturn(tail);
+
+        when(buffer.getAndAddLong(anyInt(), anyLong())).thenReturn(head + (tail << capShift));
 
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(new byte[1024]);
 
@@ -98,12 +101,15 @@ public class ManyToOneRingBufferTest
     @Test
     public void shouldRejectWriteWhenBufferFull()
     {
+        final int capShift = 32 - Integer.numberOfLeadingZeros(CAPACITY - 1);
         final int length = 8;
         final long head = 0L;
         final long tail = head + CAPACITY;
 
         when(buffer.getLongVolatile(HEAD_COUNTER_INDEX)).thenReturn(head);
         when(buffer.getLongVolatile(TAIL_COUNTER_INDEX)).thenReturn(tail);
+
+        when(buffer.getAndAddLong(anyInt(), anyLong())).thenReturn(head + (tail << capShift));
 
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(new byte[1024]);
 
@@ -116,8 +122,9 @@ public class ManyToOneRingBufferTest
     }
 
     @Test
-    public void shouldInsertPaddingRecordPlusMessageOnBufferWrap()
+    public void shouldInsertPaddingRecordPairOnBufferWrap()
     {
+        final int capShift = 32 - Integer.numberOfLeadingZeros(CAPACITY - 1);
         final int length = 200;
         final int recordLength = length + HEADER_LENGTH;
         final int alignedRecordLength = align(recordLength, ALIGNMENT);
@@ -126,25 +133,25 @@ public class ManyToOneRingBufferTest
 
         when(buffer.getLongVolatile(HEAD_COUNTER_INDEX)).thenReturn(head);
         when(buffer.getLongVolatile(TAIL_COUNTER_INDEX)).thenReturn(tail);
-        when(buffer.compareAndSetLong(TAIL_COUNTER_INDEX, tail, tail + alignedRecordLength + ALIGNMENT))
-            .thenReturn(TRUE);
+
+        when(buffer.getAndAddLong(anyInt(), anyLong())).thenReturn(head + (tail << capShift));
 
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(new byte[1024]);
 
         final int srcIndex = 0;
-        assertTrue(ringBuffer.write(MSG_TYPE_ID, srcBuffer, srcIndex, length));
+        assertFalse(ringBuffer.write(MSG_TYPE_ID, srcBuffer, srcIndex, length));
 
         final InOrder inOrder = inOrder(buffer);
-        inOrder.verify(buffer).putLongOrdered((int)tail, makeHeader(HEADER_LENGTH, PADDING_MSG_TYPE_ID));
+        inOrder.verify(buffer).putLongOrdered(
+            0, makeHeader(alignedRecordLength - 2 * HEADER_LENGTH, PADDING_MSG_TYPE_ID));
 
-        inOrder.verify(buffer).putLongOrdered(0, makeHeader(-recordLength, MSG_TYPE_ID));
-        inOrder.verify(buffer).putBytes(encodedMsgOffset(0), srcBuffer, srcIndex, length);
-        inOrder.verify(buffer).putIntOrdered(lengthOffset(0), recordLength);
+        inOrder.verify(buffer).putLongOrdered((int)tail, makeHeader(HEADER_LENGTH, PADDING_MSG_TYPE_ID));
     }
 
     @Test
-    public void shouldInsertPaddingRecordPlusMessageOnBufferWrapWithHeadEqualToTail()
+    public void shouldInsertPaddingRecordPairOnBufferWrapWithHeadEqualToTail()
     {
+        final int capShift = 32 - Integer.numberOfLeadingZeros(CAPACITY - 1);
         final int length = 200;
         final int recordLength = length + HEADER_LENGTH;
         final int alignedRecordLength = align(recordLength, ALIGNMENT);
@@ -153,20 +160,19 @@ public class ManyToOneRingBufferTest
 
         when(buffer.getLongVolatile(HEAD_COUNTER_INDEX)).thenReturn(head);
         when(buffer.getLongVolatile(TAIL_COUNTER_INDEX)).thenReturn(tail);
-        when(buffer.compareAndSetLong(TAIL_COUNTER_INDEX, tail, tail + alignedRecordLength + ALIGNMENT))
-            .thenReturn(TRUE);
+
+        when(buffer.getAndAddLong(anyInt(), anyLong())).thenReturn(head + (tail << capShift));
 
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(new byte[1024]);
 
         final int srcIndex = 0;
-        assertTrue(ringBuffer.write(MSG_TYPE_ID, srcBuffer, srcIndex, length));
+        assertFalse(ringBuffer.write(MSG_TYPE_ID, srcBuffer, srcIndex, length));
 
         final InOrder inOrder = inOrder(buffer);
-        inOrder.verify(buffer).putLongOrdered((int)tail, makeHeader(HEADER_LENGTH, PADDING_MSG_TYPE_ID));
+        inOrder.verify(buffer).putLongOrdered(
+            0, makeHeader(alignedRecordLength - 2 * HEADER_LENGTH, PADDING_MSG_TYPE_ID));
 
-        inOrder.verify(buffer).putLongOrdered(0, makeHeader(-recordLength, MSG_TYPE_ID));
-        inOrder.verify(buffer).putBytes(encodedMsgOffset(0), srcBuffer, srcIndex, length);
-        inOrder.verify(buffer).putIntOrdered(lengthOffset(0), recordLength);
+        inOrder.verify(buffer).putLongOrdered((int)tail, makeHeader(HEADER_LENGTH, PADDING_MSG_TYPE_ID));
     }
 
     @Test
@@ -379,12 +385,15 @@ public class ManyToOneRingBufferTest
     {
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(new byte[1024]);
 
+        when(buffer.compareAndSetLong(anyInt(), anyLong(), anyLong())).thenReturn(TRUE);
+
         ringBuffer.write(MSG_TYPE_ID, srcBuffer, 0, ringBuffer.maxMsgLength() + 1);
     }
 
     @Test
     public void shouldInsertPaddingAndWriteToBuffer()
     {
+        final int capShift = 32 - Integer.numberOfLeadingZeros(CAPACITY - 1);
         final int padding = 200;
         final int messageLength = 400;
         final int recordLength = messageLength + HEADER_LENGTH;
@@ -403,8 +412,10 @@ public class ManyToOneRingBufferTest
         when(buffer.compareAndSetLong(TAIL_COUNTER_INDEX, tail, tail + alignedRecordLength + padding))
             .thenReturn(true);
 
+        when(buffer.getAndAddLong(anyInt(), anyLong())).thenReturn(head + (tail << capShift));
+
         final UnsafeBuffer srcBuffer = new UnsafeBuffer(new byte[messageLength]);
 
-        assertTrue(ringBuffer.write(MSG_TYPE_ID, srcBuffer, 0, messageLength));
+        assertFalse(ringBuffer.write(MSG_TYPE_ID, srcBuffer, 0, messageLength));
     }
 }
