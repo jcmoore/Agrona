@@ -48,7 +48,6 @@ public class ManyToOneRingBuffer implements RingBuffer
     private final int capacity;
     private final int maxMsgLength;
     private final int tailPositionIndex;
-    private final int headCachePositionIndex;
     private final int headPositionIndex;
     private final int correlationIdCounterIndex;
     private final int consumerHeartbeatIndex;
@@ -74,7 +73,6 @@ public class ManyToOneRingBuffer implements RingBuffer
 
         maxMsgLength = capacity / 8;
         tailPositionIndex = capacity + TAIL_POSITION_OFFSET;
-        headCachePositionIndex = capacity + HEAD_CACHE_POSITION_OFFSET;
         headPositionIndex = capacity + HEAD_POSITION_OFFSET;
         correlationIdCounterIndex = capacity + CORRELATION_COUNTER_OFFSET;
         consumerHeartbeatIndex = capacity + CONSUMER_HEARTBEAT_OFFSET;
@@ -238,7 +236,20 @@ public class ManyToOneRingBuffer implements RingBuffer
      */
     public long producerPosition()
     {
-        return size() + buffer.getLongVolatile(headCachePositionIndex);
+        // return values here may not be *strictly* monotonic
+        final int capacity = this.capacity;
+        final int mask = capacity - 1;
+
+        final long bits = buffer.getLongVolatile(tailPositionIndex);
+        UnsafeAccess.UNSAFE.loadFence();
+        final long current = buffer.getLongVolatile(headPositionIndex);
+        final long tail = bits >> capShift;
+        final long head = bits & mask;
+        // head-terminating writes are forbidden
+        final int availableCapacity = capacity - HEADER_LENGTH - (int)(tail - head);
+        final long index = availableCapacity >= 0 ? (mask & tail) : (mask & (head + (long)capacity - HEADER_LENGTH));
+
+        return current - (mask & current) + index + (((mask & current) > index) ? capacity : 0);
     }
 
     /**
@@ -366,7 +377,6 @@ public class ManyToOneRingBuffer implements RingBuffer
                 final long current = buffer.getLongVolatile(headPositionIndex);
                 final int update = mask & (int)current;
                 final long relative = update > tailIndex ? capacity + (long)tailIndex : tailIndex;
-                buffer.putLongVolatile(headCachePositionIndex, current);
                 buffer.putLongVolatile(tailPositionIndex, update + (relative << capShift));
             }
             return INSUFFICIENT_CAPACITY;
