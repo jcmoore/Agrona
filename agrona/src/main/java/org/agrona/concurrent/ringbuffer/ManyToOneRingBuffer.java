@@ -44,7 +44,7 @@ public class ManyToOneRingBuffer implements RingBuffer
      */
     private static final int DISCONTIGUOUS_CAPACITY = -4;
 
-    private final int capShift;
+    private final int indexBitDepth;
     private final int capacity;
     private final int maxMsgLength;
     private final int tailPositionIndex;
@@ -67,7 +67,7 @@ public class ManyToOneRingBuffer implements RingBuffer
         this.buffer = buffer;
         checkCapacity(buffer.capacity());
         capacity = buffer.capacity() - TRAILER_LENGTH;
-        capShift = 32 - Integer.numberOfLeadingZeros(capacity - 1);
+        indexBitDepth = 32 - Integer.numberOfLeadingZeros(capacity - 1);
 
         buffer.verifyAlignment();
 
@@ -84,6 +84,16 @@ public class ManyToOneRingBuffer implements RingBuffer
     public int capacity()
     {
         return capacity;
+    }
+
+    /**
+     * Get the number of bits necessary to represent the maximum byte index of the ring-buffer.
+     *
+     * @return the bit depth of the max byte index of the ring-buffer.
+     */
+    public int indexBitDepth()
+    {
+        return indexBitDepth;
     }
 
     /**
@@ -243,7 +253,7 @@ public class ManyToOneRingBuffer implements RingBuffer
         final long bits = buffer.getLongVolatile(tailPositionIndex);
         UnsafeAccess.UNSAFE.loadFence();
         final long current = buffer.getLongVolatile(headPositionIndex);
-        final long tail = bits >> capShift;
+        final long tail = bits >> indexBitDepth;
         final long head = bits & mask;
         // head-terminating writes are forbidden
         final int availableCapacity = capacity - HEADER_LENGTH - (int)(tail - head);
@@ -265,12 +275,12 @@ public class ManyToOneRingBuffer implements RingBuffer
      */
     public int size()
     {
-        final int capShift = this.capShift;
+        final int indexBitDepth = this.indexBitDepth;
         final int capacity = this.capacity;
         final int mask = capacity - 1;
 
         final long bits = buffer.getLongVolatile(tailPositionIndex);
-        final long tail = bits >> capShift;
+        final long tail = bits >> indexBitDepth;
         final long head = mask & (int)bits;
         final int diff = (int)(tail - head);
 
@@ -285,7 +295,7 @@ public class ManyToOneRingBuffer implements RingBuffer
         final AtomicBuffer buffer = this.buffer;
         final int mask = capacity - 1;
         final int consumerIndex = (int)(buffer.getLongVolatile(headPositionIndex) & mask);
-        final int producerIndex = (int)((buffer.getLongVolatile(tailPositionIndex) >> capShift) & mask);
+        final int producerIndex = (int)((buffer.getLongVolatile(tailPositionIndex) >> indexBitDepth) & mask);
 
         if (producerIndex == consumerIndex)
         {
@@ -357,13 +367,13 @@ public class ManyToOneRingBuffer implements RingBuffer
 
     private int claimCapacity(final AtomicBuffer buffer, final int requiredCapacity)
     {
-        final int capShift = this.capShift;
+        final int indexBitDepth = this.indexBitDepth;
         final int capacity = this.capacity;
         final int tailPositionIndex = this.tailPositionIndex;
         final int mask = capacity - 1;
 
-        final long bits = buffer.getAndAddLong(tailPositionIndex, ((long)requiredCapacity) << capShift);
-        final long tail = bits >> capShift;
+        final long bits = buffer.getAndAddLong(tailPositionIndex, ((long)requiredCapacity) << indexBitDepth);
+        final long tail = bits >> indexBitDepth;
         final long head = bits & mask;
 
         final int availableCapacity = capacity - HEADER_LENGTH - (int)(tail - head); // forbid head-terminating writes
@@ -377,7 +387,7 @@ public class ManyToOneRingBuffer implements RingBuffer
                 final long current = buffer.getLongVolatile(headPositionIndex);
                 final int update = mask & (int)current;
                 final long relative = update > tailIndex ? capacity + (long)tailIndex : tailIndex;
-                buffer.putLongVolatile(tailPositionIndex, update + (relative << capShift));
+                buffer.putLongVolatile(tailPositionIndex, update + (relative << indexBitDepth));
             }
             return INSUFFICIENT_CAPACITY;
         }
