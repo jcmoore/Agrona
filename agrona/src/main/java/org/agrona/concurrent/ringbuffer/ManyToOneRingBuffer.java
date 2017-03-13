@@ -384,7 +384,7 @@ public class ManyToOneRingBuffer implements RingBuffer
         else if (requiredCapacity > toBufferEndLength)
         {
             buffer.putLongOrdered(
-                0, makeHeader(requiredCapacity - toBufferEndLength - HEADER_LENGTH, PADDING_MSG_TYPE_ID));
+                0, makeHeader(requiredCapacity - toBufferEndLength, PADDING_MSG_TYPE_ID));
             buffer.putLongOrdered(tailIndex, makeHeader(toBufferEndLength, PADDING_MSG_TYPE_ID));
             return DISCONTIGUOUS_CAPACITY;
         }

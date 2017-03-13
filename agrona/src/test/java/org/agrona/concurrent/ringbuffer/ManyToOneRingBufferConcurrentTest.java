@@ -137,7 +137,7 @@ public class ManyToOneRingBufferConcurrentTest
             {
             }
 
-            final int length = BitUtil.SIZE_OF_INT * 2;
+            final int length = BitUtil.SIZE_OF_INT * 7; // messages will straddle the buffer boundary at this size
             final int repsValueOffset = BitUtil.SIZE_OF_INT;
             final UnsafeBuffer srcBuffer = new UnsafeBuffer(new byte[1024]);
 

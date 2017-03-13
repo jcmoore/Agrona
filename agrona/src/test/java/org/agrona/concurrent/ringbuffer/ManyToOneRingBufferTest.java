@@ -143,7 +143,7 @@ public class ManyToOneRingBufferTest
 
         final InOrder inOrder = inOrder(buffer);
         inOrder.verify(buffer).putLongOrdered(
-            0, makeHeader(alignedRecordLength - 2 * HEADER_LENGTH, PADDING_MSG_TYPE_ID));
+            0, makeHeader(alignedRecordLength - HEADER_LENGTH, PADDING_MSG_TYPE_ID));
 
         inOrder.verify(buffer).putLongOrdered((int)tail, makeHeader(HEADER_LENGTH, PADDING_MSG_TYPE_ID));
     }
@@ -170,7 +170,7 @@ public class ManyToOneRingBufferTest
 
         final InOrder inOrder = inOrder(buffer);
         inOrder.verify(buffer).putLongOrdered(
-            0, makeHeader(alignedRecordLength - 2 * HEADER_LENGTH, PADDING_MSG_TYPE_ID));
+            0, makeHeader(alignedRecordLength - HEADER_LENGTH, PADDING_MSG_TYPE_ID));
 
         inOrder.verify(buffer).putLongOrdered((int)tail, makeHeader(HEADER_LENGTH, PADDING_MSG_TYPE_ID));
     }
